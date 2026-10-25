@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Trace Live</title>
+<style>
+:root{--bg:#0b0b0d;--fg:#f4f4f6;--ac:#ff5a3c;--pn:rgba(28,28,32,.88)}
+@media (prefers-color-scheme: light){:root{--bg:#0b0b0d;--fg:#f4f4f6}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,system-ui,sans-serif;overflow:hidden;touch-action:none}
+#stage{position:fixed;inset:0;overflow:hidden}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#ov{position:absolute;left:50%;top:50%;transform-origin:center;will-change:transform;pointer-events:none;max-width:none}
+#home{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:32px;text-align:center;background:var(--bg);z-index:5}
+#home h1{margin:0;font-size:32px;letter-spacing:-.5px}
+#home p{margin:0;opacity:.7;line-height:1.5;max-width:300px;font-size:15px}
+.btn{background:var(--ac);color:#fff;border:0;border-radius:16px;padding:16px 28px;font-size:17px;font-weight:600}
+.btn.sec{background:rgba(255,255,255,.12)}
+#err{color:#ffb4a6;font-size:14px;max-width:300px;display:none}
+#bar{position:fixed;left:0;right:0;bottom:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:var(--pn);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);z-index:4;display:none;flex-direction:column;gap:10px;border-radius:22px 22px 0 0}
+.row{display:flex;gap:8px;align-items:center}
+.row label{font-size:13px;opacity:.7;width:58px}
+input[type=range]{flex:1;accent-color:var(--ac)}
+.chip{flex:1;background:rgba(255,255,255,.12);color:var(--fg);border:0;border-radius:12px;padding:11px 4px;font-size:14px;font-weight:600}
+.chip.on{background:var(--ac);color:#fff}
+#lockbadge{position:fixed;top:calc(10px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);background:var(--pn);padding:6px 14px;border-radius:20px;font-size:13px;z-index:4;display:none}
+#hide{position:fixed;top:calc(10px + env(safe-area-inset-top));right:12px;z-index:4;background:var(--pn);border:0;color:var(--fg);border-radius:20px;padding:8px 14px;font-size:13px;display:none}
+</style>
+</head>
+<body>
+<div id="stage"><video id="v" playsinline muted autoplay></video><img id="ov" alt=""></div>
+
+<div id="home">
+  <h1>Trace Live</h1>
+  <p>Pick a photo, point your phone at your paper, then draw while the photo floats over the live camera.</p>
+  <button class="btn" id="pick">Choose photo</button>
+  <div id="err"></div>
+  <input type="file" id="file" accept="image/*" hidden>
+</div>
+
+<div id="lockbadge">Locked – safe to draw</div>
+<button id="hide">Hide panel</button>
+
+<div id="bar">
+  <div class="row"><label>Opacity</label><input type="range" id="op" min="5" max="100" value="50"></div>
+  <div class="row"><label>Size</label><input type="range" id="sz" min="10" max="400" value="100"></div>
+  <div class="row"><label>Rotate</label><input type="range" id="rt" min="-180" max="180" value="0"></div>
+  <div class="row">
+    <button class="chip" id="lines">Lines</button>
+    <button class="chip" id="flip">Flip</button>
+    <button class="chip" id="lock">Lock</button>
+    <button class="chip" id="new">New photo</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var v=$('v'),ov=$('ov'),home=$('home'),bar=$('bar'),err=$('err');
+  var S={x:0,y:0,s:1,r:0,fx:1,locked:false,lines:false};
+  var srcURL='',lineURL='',stream=null,wake=null;
+
+  function apply(){
+    ov.style.transform='translate(-50%,-50%) translate('+S.x+'px,'+S.y+'px) rotate('+S.r+'deg) scale('+(S.s*S.fx)+','+S.s+')';
+    $('sz').value=Math.round(S.s*100);
+    $('rt').value=Math.max(-180,Math.min(180,Math.round(S.r)));
+  }
+
+  $('pick').onclick=function(){$('file').click()};
+  $('new').onclick=function(){$('file').click()};
+
+  $('file').onchange=function(e){
+    var f=e.target.files&&e.target.files[0]; if(!f)return;
+    var url=URL.createObjectURL(f);
+    var im=new Image();
+    im.onload=function(){
+      // downscale for speed
+      var m=1400,sc=Math.min(1,m/Math.max(im.width,im.height));
+      var c=document.createElement('canvas');c.width=Math.round(im.width*sc);c.height=Math.round(im.height*sc);
+      c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+      srcURL=c.toDataURL('image/jpeg',.92);
+      lineURL=makeLines(c);
+      S.lines=false;$('lines').classList.remove('on');
+      ov.src=srcURL;
+      var fit=Math.min(window.innerWidth/c.width,window.innerHeight*.6/c.height);
+      ov.style.width=c.width+'px';ov.style.height=c.height+'px';
+      S.s=fit;S.x=0;S.y=-40;S.r=0;S.fx=1;apply();
+      ov.style.opacity=$('op').value/100;
+      startCam();
+    };
+    im.src=url;
+    e.target.value='';
+  };
+
+  function makeLines(c){
+    var w=c.width,h=c.height,ctx=c.getContext('2d');
+    var d=ctx.getImageData(0,0,w,h).data,g=new Float32Array(w*h);
+    for(var i=0;i<w*h;i++)g[i]=d[i*4]*.3+d[i*4+1]*.59+d[i*4+2]*.11;
+    var o=document.createElement('canvas');o.width=w;o.height=h;
+    var oc=o.getContext('2d'),out=oc.createImageData(w,h),p=out.data;
+    for(var y=1;y<h-1;y++)for(var x=1;x<w-1;x++){
+      var k=y*w+x;
+      var gx=-g[k-w-1]-2*g[k-1]-g[k+w-1]+g[k-w+1]+2*g[k+1]+g[k+w+1];
+      var gy=-g[k-w-1]-2*g[k-w]-g[k-w+1]+g[k+w-1]+2*g[k+w]+g[k+w+1];
+      var m=Math.sqrt(gx*gx+gy*gy),a=m>60?Math.min(255,m*1.6):0,q=k*4;
+      p[q]=255;p[q+1]=40;p[q+2]=40;p[q+3]=a;
+    }
+    oc.putImageData(out,0,0);
+    return o.toDataURL('image/png');
+  }
+
+  function startCam(){
+    err.style.display='none';
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){showErr('Camera is not available here. Open this page directly in Safari over HTTPS.');return}
+    if(stream){show();return}
+    navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false})
+    .then(function(s){stream=s;v.srcObject=s;v.play();show();getWake()})
+    .catch(function(e){showErr('Camera blocked ('+(e.name||'error')+'). Allow camera access, or open this page directly in Safari instead of inside another app.')});
+  }
+  function showErr(t){err.textContent=t;err.style.display='block';home.style.display='flex'}
+  function show(){home.style.display='none';bar.style.display='flex';$('hide').style.display='block'}
+  function getWake(){try{navigator.wakeLock&&navigator.wakeLock.request('screen').then(function(w){wake=w}).catch(function(){})}catch(e){}}
+  document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&stream)getWake()});
+
+  $('op').oninput=function(){ov.style.opacity=this.value/100};
+  $('sz').oninput=function(){S.s=this.value/100;apply()};
+  $('rt').oninput=function(){S.r=+this.value;apply()};
+  $('flip').onclick=function(){S.fx*=-1;apply()};
+  $('lines').onclick=function(){
+    S.lines=!S.lines;this.classList.toggle('on',S.lines);
+    ov.src=S.lines?lineURL:srcURL;
+  };
+  $('lock').onclick=function(){
+    S.locked=!S.locked;this.classList.toggle('on',S.locked);
+    $('lockbadge').style.display=S.locked?'block':'none';
+    if(S.locked)bar.style.display='none',$('hide').style.display='none';
+  };
+  $('lockbadge').onclick=function(){
+    S.locked=false;$('lock').classList.remove('on');this.style.display='none';
+    bar.style.display='flex';$('hide').style.display='block';
+  };
+  $('hide').onclick=function(){
+    var hidden=bar.style.display==='none';
+    bar.style.display=hidden?'flex':'none';this.textContent=hidden?'Hide panel':'Show panel';
+  };
+
+  // Touch gestures: 1 finger drag, 2 fingers pinch + rotate
+  var pts={},start=null;
+  var st=$('stage');
+  function two(){var k=Object.keys(pts);if(k.length<2)return null;var a=pts[k[0]],b=pts[k[1]];
+    return{d:Math.hypot(b.x-a.x,b.y-a.y),a:Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI,cx:(a.x+b.x)/2,cy:(a.y+b.y)/2}}
+  st.addEventListener('pointerdown',function(e){
+    if(S.locked||!srcURL)return;
+    st.setPointerCapture(e.pointerId);pts[e.pointerId]={x:e.clientX,y:e.clientY};
+    start={x:S.x,y:S.y,s:S.s,r:S.r,t:two(),p:{x:e.clientX,y:e.clientY}};
+  });
+  st.addEventListener('pointermove',function(e){
+    if(!pts[e.pointerId]||S.locked)return;
+    pts[e.pointerId]={x:e.clientX,y:e.clientY};
+    var n=Object.keys(pts).length;
+    if(n===1&&start){S.x=start.x+(e.clientX-start.p.x);S.y=start.y+(e.clientY-start.p.y)}
+    else if(n>=2){
+      var t=two();
+      if(!start.t){start={x:S.x,y:S.y,s:S.s,r:S.r,t:t};}
+      S.s=Math.max(.1,Math.min(4,start.s*t.d/start.t.d));
+      S.r=start.r+(t.a-start.t.a);
+    }
+    apply();
+  });
+  function up(e){delete pts[e.pointerId];start=Object.keys(pts).length?{x:S.x,y:S.y,s:S.s,r:S.r,t:two(),p:(function(){var k=Object.keys(pts)[0];return pts[k]})()}:null}
+  st.addEventListener('pointerup',up);st.addEventListener('pointercancel',up);
+  document.addEventListener('gesturestart',function(e){e.preventDefault()});
+  document.addEventListener('touchmove',function(e){e.preventDefault()},{passive:false});
+})();
+</script>
+</body>
+</html>
